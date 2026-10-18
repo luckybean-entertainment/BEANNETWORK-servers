@@ -23,10 +23,6 @@ http.createServer((q,s)=>{
   if(q.method=='OPTIONS'){s.statusCode=204;return s.end()}
   let b='';q.on('data',c=>{b+=c;if(b.length>1.6e5)q.destroy()});
   q.on('end',async()=>{
-    s.setHeader('Access-Control-Allow-Origin','*');s.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');s.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
-  if(q.method=='OPTIONS'){s.statusCode=204;return s.end()}
-  let b='';q.on('data',c=>{b+=c;if(b.length>1.6e5)q.destroy()});
-  q.on('end',async()=>{
     const U=new URL(q.url,'http://x'),p=U.pathname,ip=(q.headers['x-forwarded-for']||'').split(',')[0].trim()||q.socket.remoteAddress;
     const j=(x,c=200)=>{s.statusCode=c;s.setHeader('Content-Type','application/json');s.end(JSON.stringify(x))};
     try{
@@ -128,3 +124,4 @@ http.createServer((q,s)=>{
     }catch(e){console.error(e.message);j({err:'Ошибка сервера'},500)}
   })
 }).listen(process.env.PORT||3000,()=>console.log('BEANNETWORK ok'));
+    
