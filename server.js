@@ -15,10 +15,11 @@ const hp=(p,s=cr.randomBytes(8).toString('hex'))=>s+':'+cr.scryptSync(p,s,32).to
 const vp=(p,h)=>{try{return cr.timingSafeEqual(Buffer.from(hp(p,h.split(':')[0])),Buffer.from(h))}catch(e){return false}};
 const hits={},lim=ip=>{const n=Date.now(),a=(hits[ip]=(hits[ip]||[]).filter(t=>n-t<6e4));a.push(n);return a.length>10};
 setInterval(()=>{for(const k in hits)if(!hits[k].some(t=>Date.now()-t<6e4))delete hits[k]},6e4).unref();
+const sys=(uid,t)=>db('messages','POST',{a:'sys',b:uid,t,ts:Date.now(),kind:'s',an:'Система'});
 http.createServer((q,s)=>{
   s.setHeader('Access-Control-Allow-Origin','*');s.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');s.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
   if(q.method=='OPTIONS'){s.statusCode=204;return s.end()}
-  let b='';q.on('data',c=>{b+=c;if(b.length>1e4)q.destroy()});
+  let b='';q.on('data',c=>{b+=c;if(b.length>1.6e5)q.destroy()});
   q.on('end',async()=>{
     const U=new URL(q.url,'http://x'),p=U.pathname,ip=(q.headers['x-forwarded-for']||'').split(',')[0].trim()||q.socket.remoteAddress;
     const j=(x,c=200)=>{s.statusCode=c;s.setHeader('Content-Type','application/json');s.end(JSON.stringify(x))};
@@ -30,39 +31,69 @@ http.createServer((q,s)=>{
         if(lim(ip))return j({err:'Слишком много попыток, подожди минуту'},429);
         const n=String(d.n||'').trim().slice(0,16),pw=String(d.p||'').slice(0,100);
         if(p=='/register'){
-         if(n.length<2||pw.length<4)return j({err:'Ник от 2 символов, пароль от 4'});
+          if(n.length<2||pw.length<4)return j({err:'Ник от 2 символов, пароль от 4'});
           if(!OK.test(n))return j({err:'В нике только буквы, цифры, _ . - и пробел'});
           const u={id:cr.randomUUID().slice(0,8),n,ph:hp(pw),tok:cr.randomUUID(),s:Math.floor(Math.max(0,Math.min(+d.s||0,1e12)))};
           try{await db('users','POST',u)}catch(e){if(e.status==409)return j({err:'Ник занят'});throw e}
           return j({id:u.id,tok:u.tok,n})}
         if(!OK.test(n))return j({err:'Неверный ник или пароль'});
-        const u=(await db('users?select=id,n,ph,tok&n=ilike.'+enc(n)+'&limit=5')).find(x=>x.n.toLowerCase()==n.toLowerCase());
-        if(!u||!vp(pw,u.ph))return j({err:'Неверный ник или пароль'});
+        const u=(await db('users?select=id,n,ph,tok,ban&n=ilike.'+enc(n)+'&limit=5')).find(x=>x.n.toLowerCase()==n.toLowerCase());
+        if(!u||!vp(pw,u.ph))return j({err:'Неверный ник или пароль'});if(u.ban>Date.now())return j({err:'Аккаунт забанен'});
         let tok=u.tok;if(!tok){tok=cr.randomUUID();await db('users?id=eq.'+enc(u.id),'PATCH',{tok})}
         return j({id:u.id,tok,n:u.n})}
-      const t=q.headers.authorization||'',me=t.length>=10?(await db('users?select=id,n&tok=eq.'+enc(t)))[0]:null;
-      if(!me)return j({err:'auth'},401);
+      const t=q.headers.authorization||'',me=t.length>=10?(await db('users?select=id,n,role,ban,mute,strikes,seen&tok=eq.'+enc(t)))[0]:null;
+      if(!me)return j({err:'auth'},401);if(me.ban>Date.now())return j({err:'banned'},403);const adm=me.role=='admin';
+      if(p=='/logout'){await db('users?id=eq.'+enc(me.id),'PATCH',{tok:cr.randomUUID()});return j({ok:1})}
+      if(p=='/me/delete'){await db('messages?or=(a.eq.'+me.id+',b.eq.'+me.id+')','DELETE');await db('posts?uid=eq.'+enc(me.id),'DELETE');await db('users?id=eq.'+enc(me.id),'DELETE');return j({ok:1})}
+      if(p=='/posts')return j(await db('posts?select=id,uid,n,t,img,ts&del=eq.false&order=ts.desc&limit=30'));
+      if(p=='/post'){const t=String(d.t||'').trim().slice(0,500),img=String(d.img||'');
+        if(me.mute>Date.now())return j({err:'Ты в муте'});
+        if((!t&&!img)||(img&&!(/^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/.test(img)&&img.length<12e4)))return j({err:'Плохой пост или фото'});
+        await db('posts','POST',{uid:me.id,n:me.n,t,img,ts:Date.now()});return j({ok:1})}
+      if(p=='/post/del'){const id=Math.floor(+d.id);if(!(id>0))return j({err:'bad'});const r=(await db('posts?select=uid&id=eq.'+id))[0];if(!r)return j({err:'Нет поста'});
+        if(r.uid!=me.id&&!adm)return j({err:'Нельзя'});
+        await db('posts?id=eq.'+id,'PATCH',{del:true});
+        if(r.uid!=me.id)await sys(r.uid,'🚫 Твой пост заблокирован администратором'+(d.reason?': '+String(d.reason).slice(0,100):''));
+        return j({ok:1})}
+      if(p.startsWith('/admin/')){if(!adm)return j({err:'Нет прав'},403);
+        if(p=='/admin/act'){const id=String(d.id||'');if(!ID.test(id))return j({err:'bad'});
+          const u=(await db('users?select=id,role,strikes&id=eq.'+enc(id)))[0];if(!u||u.role=='admin')return j({err:'Нельзя'});
+          const A={ban:{ban:9e15},unban:{ban:0},mute:{mute:Date.now()+36e5},unmute:{mute:0},strike:{strikes:(u.strikes||0)+1},unstrike:{strikes:0}}[d.act];
+          if(!A)return j({err:'bad'});await db('users?id=eq.'+enc(id),'PATCH',A);
+          if(d.act=='strike')await sys(id,'⚠️ Тебе выдан страйк ('+A.strikes+')');if(d.act=='mute')await sys(id,'🔇 Ты в муте на 1 час');
+          return j({ok:1})}
+        if(p=='/admin/chats'){const u=U.searchParams.get('u')||'';if(!ID.test(u))return j([]);
+          const m=await db('messages?select=a,b&or=(a.eq.'+u+',b.eq.'+u+')&limit=500'),z=new Set();m.forEach(x=>{const o=x.a==u?x.b:x.a;if(o!='sys'&&o!='all'&&ID.test(o))z.add(o)});
+          const ids=[...z];return j(ids.length?await db('users?select=id,n&id=in.('+ids.join(',')+')'):[])}
+        if(p=='/admin/chat'){const a=U.searchParams.get('a')||'',b2=U.searchParams.get('b')||'';if(!ID.test(a)||!ID.test(b2))return j([]);
+          return j((await db('messages?select=a,an,t&or=(and(a.eq.'+a+',b.eq.'+b2+'),and(a.eq.'+b2+',b.eq.'+a+'))&order=ts.desc&limit=100')).reverse().map(x=>({f:x.a==a?1:0,n:x.an,t:x.t})))}
+        return j({err:'404'},404)}
       if(p=='/score'){const v=Math.floor(Math.min(+d.s||0,1e12));if(v>0)await db('users?id=eq.'+enc(me.id)+'&s=lt.'+v,'PATCH',{s:v});return j({ok:1})}
       if(p=='/users'){const w=(U.searchParams.get('q')||'').replace(/[^\p{L}\p{N}_ .\-]/gu,'').slice(0,16);
-        return j(await db('users?select=id,n,s&id=neq.'+enc(me.id)+(w?'&n=ilike.*'+enc(w)+'*':'')+'&order=s.desc&limit=30'))}
+        return j(await db('users?select='+(adm?'id,n,s,seen,role,ban,mute,strikes':'id,n,s,seen,role')+'&id=neq.'+enc(me.id)+(w?'&n=ilike.*'+enc(w)+'*':'')+'&order=s.desc&limit=30'))}
       if(p=='/chat'&&q.method=='POST'){const w=String(d.text||'').trim().slice(0,300),to=String(d.to||'');
-        if(!w||!ID.test(to)||to==me.id)return j({err:'bad'});
-        if(!(await db('users?select=id&id=eq.'+enc(to))).length)return j({err:'bad'});
-        await db('messages','POST',{a:me.id,b:to,t:w,ts:Date.now()});return j({ok:1})}
-      if(p=='/chat'){const o=U.searchParams.get('with')||'';if(!ID.test(o))return j([]);
-        const m=await db('messages?select=a,t,ts&or=(and(a.eq.'+me.id+',b.eq.'+o+'),and(a.eq.'+o+',b.eq.'+me.id+'))&order=ts.desc&limit=100');
-        return j(m.reverse().map(x=>({f:x.a==me.id?1:0,t:x.t,ts:x.ts})))}
+        if(!w||!ID.test(to)||to==me.id||to=='sys')return j({err:'bad'});
+        if(me.mute>Date.now())return j({err:'Ты в муте'});
+        if(to!='all'&&!(await db('users?select=id&id=eq.'+enc(to))).length)return j({err:'bad'});
+        await db('messages','POST',{a:me.id,b:to,t:w,ts:Date.now(),an:me.n});return j({ok:1})}
+      if(p=='/chat'){const o=U.searchParams.get('with')||'';if(!ID.test(o))return j({m:[]});
+        const m=await db('messages?select=a,an,t,ts,kind&'+(o=='all'?'b=eq.all':o=='sys'?'a=eq.sys&b=eq.'+me.id:'or=(and(a.eq.'+me.id+',b.eq.'+o+'),and(a.eq.'+o+',b.eq.'+me.id+'))')+'&order=ts.desc&limit=100'),
+          pu=o=='all'||o=='sys'?[]:await db('users?select=seen&id=eq.'+enc(o));
+        return j({m:m.reverse().map(x=>({f:x.a==me.id?1:0,n:x.an,t:x.t,ts:x.ts,k:x.kind})),seen:(pu[0]||{}).seen||0})}
       if(p=='/chats'){const m=await db('messages?select=a,b,t&or=(a.eq.'+me.id+',b.eq.'+me.id+')&order=ts.desc&limit=300'),z={};
         m.forEach(x=>{const o=x.a==me.id?x.b:x.a;if(!z[o])z[o]={id:o,last:x.t}});
         const ids=Object.keys(z).filter(i=>ID.test(i));if(!ids.length)return j([]);
-        return j((await db('users?select=id,n&id=in.('+ids.join(',')+')')).map(u=>({id:u.id,n:u.n,last:z[u.id].last})))}
+        return j((await db('users?select=id,n,seen,role&id=in.('+ids.join(',')+')')).map(u=>({id:u.id,n:u.n,seen:u.seen,role:u.role})))}
       if(p=='/transfer'){const a=Math.floor(+d.amount),to=String(d.to||'');
         if(!(a>0)||a>1e7||!ID.test(to)||to==me.id)return j({err:'Неверный перевод'});
         if(!(await db('users?select=id&id=eq.'+enc(to))).length)return j({err:'Игрок не найден'});
-        await db('rpc/add_coins','POST',{uid:to,amt:a});return j({ok:1})}
-      if(p=='/poll')return j({coins:+(await db('rpc/claim_coins','POST',{uid:me.id}))||0});
+        await db('rpc/add_coins','POST',{uid:to,amt:a});await db('messages','POST',{a:me.id,b:to,t:'💸 Перевод: '+a.toLocaleString('ru')+' 🫘',ts:Date.now(),kind:'t',an:me.n});return j({ok:1})}
+      if(p=='/poll'){const since=+U.searchParams.get('since')||Date.now(),now=Date.now();
+        if(now-(me.seen||0)>2e4)db('users?id=eq.'+enc(me.id),'PATCH',{seen:now}).catch(()=>{});
+        const c=+(await db('rpc/claim_coins','POST',{uid:me.id}))||0,m=await db('messages?select=an,t,kind,ts&b=eq.'+enc(me.id)+'&ts=gt.'+since+'&order=ts.asc&limit=5');
+        return j({coins:c,m,now,role:me.role})}
       j({err:'404'},404)
     }catch(e){console.error(e.message);j({err:'Ошибка сервера'},500)}
   })
 }).listen(process.env.PORT||3000,()=>console.log('BEANNETWORK ok'));
-         
+                   
