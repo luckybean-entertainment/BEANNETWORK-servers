@@ -11,6 +11,9 @@ async function db(path,method='GET',body){
   if(!r.ok){const e=new Error('db '+r.status+' '+t.slice(0,200));e.status=r.status;throw e}
   return j}
 const cardNum=()=>{const d=[9,0,0,0];for(let i=0;i<12;i++)d.push(cr.randomInt(0,10));const lu=a=>{let t=0;a.slice().reverse().forEach((x,i)=>{if(i%2==1){x*=2;if(x>9)x-=9}t+=x});return t%10==0};if(lu(d))d[15]=(d[15]+1)%10;return d.join('').replace(/(\d{4})(?=\d)/g,'$1 ')};
+const myClan=async uid=>{const p=(await db('bb_players?select=id&acc=eq.'+enc(uid)))[0];if(!p)return null;const m=(await db('bb_cmem?select=cid&pid=eq.'+enc(p.id)))[0];if(!m)return null;return(await db('bb_clans?select=id,name&id=eq.'+enc(m.cid)))[0]||null};
+const MX={p:[/^data:image\/jpeg;base64,/,18e4],g:[/^data:image\/gif;base64,/,4e5],v:[/^data:video\/(webm|mp4)[^,]{0,60},/,25e4],a:[/^data:audio\/(webm|mp4|ogg)[^,]{0,60},/,16e4]};
+const clean=()=>db('messages?mt=in.(p,g,v,a)&ts=lt.'+(Date.now()-3*864e5),'PATCH',{mt:'x',media:''}).catch(()=>{});setTimeout(clean,5e3);setInterval(clean,6*36e5).unref();
 const enc=encodeURIComponent,OK=/^[\p{L}\p{N}_ .\-]+$/u,ID=/^[\w-]{1,40}$/;
 const hp=(p,s=cr.randomBytes(8).toString('hex'))=>s+':'+cr.scryptSync(p,s,32).toString('hex');
 const vp=(p,h)=>{try{return cr.timingSafeEqual(Buffer.from(hp(p,h.split(':')[0])),Buffer.from(h))}catch(e){return false}};
@@ -25,7 +28,7 @@ const sys=async(uid,t)=>{await db('messages','POST',{a:'sys',b:uid,t,ts:Date.now
 http.createServer((q,s)=>{
   s.setHeader('Access-Control-Allow-Origin','*');s.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization');s.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
   if(q.method=='OPTIONS'){s.statusCode=204;return s.end()}
-  let b='';q.on('data',c=>{b+=c;if(b.length>1.6e5)q.destroy()});
+  let b='';q.on('data',c=>{b+=c;if(b.length>6e5)q.destroy()});
   q.on('end',async()=>{
     const U=new URL(q.url,'http://x'),p=U.pathname,ip=(q.headers['x-forwarded-for']||'').split(',')[0].trim()||q.socket.remoteAddress;
     const j=(x,c=200)=>{s.statusCode=c;s.setHeader('Content-Type','application/json');s.end(JSON.stringify(x))};
@@ -80,6 +83,8 @@ http.createServer((q,s)=>{
         if(p=='/admin/take'){const id=String(d.id||''),a=Math.floor(+d.amount);if(!ID.test(id)||!(a>0)||a>1e12)return j({err:'bad'});
           const u=(await db('users?select=id,role,c&id=eq.'+enc(id)))[0];if(!u||u.role=='admin')return j({err:'Нельзя'});
           await db('users?id=eq.'+enc(id),'PATCH',{c:(u.c||0)-a});await sys(id,'⚠️ Администратор забрал '+a.toLocaleString('ru')+' 🫘');return j({ok:1})}
+        if(p=='/admin/packban'){const id=Math.floor(+d.id),pk=(await db('sticker_packs?select=uid&id=eq.'+(id||0)))[0];if(!pk)return j({err:'Нет пака'});
+          await db('sticker_packs?id=eq.'+id,'PATCH',{ban:d.ban!==false});if(d.ban!==false)await sys(pk.uid,'🚫 Твой стикерпак заблокирован администратором');return j({ok:1})}
         if(p=='/admin/chats'){const u=U.searchParams.get('u')||'';if(!ID.test(u))return j([]);
           const m=await db('messages?select=a,b&or=(a.eq.'+u+',b.eq.'+u+')&limit=500'),z=new Set();m.forEach(x=>{const o=x.a==u?x.b:x.a;if(o!='sys'&&o!='all'&&ID.test(o))z.add(o)});
           const ids=[...z];return j(ids.length?await db('users?select=id,n&id=in.('+ids.join(',')+')'):[])}
@@ -89,15 +94,37 @@ http.createServer((q,s)=>{
       if(p=='/score'){const v=Math.max(0,Math.floor(Math.min(+d.s||0,1e15)));await db('users?id=eq.'+enc(me.id),'PATCH',{s:v});return j({ok:1})}
             if(p=='/users'){const w=(U.searchParams.get('q')||'').replace(/[^\p{L}\p{N}_ .\-]/gu,'').slice(0,16);
         return j(await db('users?select='+(adm?'id,n,s,seen,role,ban,mute,strikes':'id,n,s,seen,role')+'&id=neq.'+enc(me.id)+(w?'&n=ilike.*'+enc(w)+'*':'')+'&order=s.desc&limit=30'))}
-      if(p=='/chat'&&q.method=='POST'){const w=String(d.text||'').trim().slice(0,300),to=String(d.to||'');
-        if(!w||!ID.test(to)||to==me.id||to=='sys')return j({err:'bad'});
+      if(p=='/chat'&&q.method=='POST'){const to=String(d.to||''),mt=String(d.mt||'');let w=String(d.text||'').trim().slice(0,300),md=String(d.media||'');
+        if(!ID.test(to)||to==me.id||to=='sys')return j({err:'bad'});
         if(me.mute>Date.now())return j({err:'Ты в муте'});
-        if(to!='all'&&!(await db('users?select=id&id=eq.'+enc(to))).length)return j({err:'bad'});
-        await db('messages','POST',{a:me.id,b:to,t:w,ts:Date.now(),an:me.n});if(to!='all')push(to,'💬 '+me.n,w);return j({ok:1})}
-      if(p=='/chat'){const o=U.searchParams.get('with')||'';if(!ID.test(o))return j({m:[]});
-        const m=await db('messages?select=a,an,t,ts,kind&'+(o=='all'?'b=eq.all':o=='sys'?'a=eq.sys&b=eq.'+me.id:'or=(and(a.eq.'+me.id+',b.eq.'+o+'),and(a.eq.'+o+',b.eq.'+me.id+'))')+'&order=ts.desc&limit=100'),
-          pu=o=='all'||o=='sys'?[]:await db('users?select=seen&id=eq.'+enc(o));
-        return j({m:m.reverse().map(x=>({f:x.a==me.id?1:0,n:x.an,t:x.t,ts:x.ts,k:x.kind})),seen:(pu[0]||{}).seen||0})}
+        if(mt=='s'){const sk=(await db('stickers?select=pack_id&id=eq.'+(Math.floor(+md)||0)))[0],pk=sk&&(await db('sticker_packs?select=ban&id=eq.'+sk.pack_id))[0];if(!pk||pk.ban)return j({err:'Стикер недоступен'});md=String(Math.floor(+md));w=''}
+        else if(mt){const m=MX[mt];if(!m||!m[0].test(md)||md.length>m[1])return j({err:'Файл не подходит или слишком большой'});w=''}
+        else if(!w)return j({err:'bad'});
+        let b2=to;if(to=='clan'){const c=await myClan(me.id);if(!c)return j({err:'Ты не в клане'});b2='clan:'+c.id}
+        else if(to!='all'&&!(await db('users?select=id&id=eq.'+enc(to))).length)return j({err:'bad'});
+        await db('messages','POST',{a:me.id,b:b2,t:w,ts:Date.now(),an:me.n,mt:mt,media:md});
+        if(to!='all'&&to!='clan')push(to,'💬 '+me.n,w||({p:'📷 Фото',g:'GIF',v:'🎥 Видео',a:'🎤 Голосовое',s:'Стикер'})[mt]);return j({ok:1})}
+      if(p=='/chat'){const o=U.searchParams.get('with')||'';if(!ID.test(o))return j({m:[]});let f;
+        if(o=='clan'){const c=await myClan(me.id);if(!c)return j({m:[]});f='b=eq.clan:'+c.id}
+        else f=o=='all'?'b=eq.all':o=='sys'?'a=eq.sys&b=eq.'+me.id:'or=(and(a.eq.'+me.id+',b.eq.'+o+'),and(a.eq.'+o+',b.eq.'+me.id+'))';
+        const m=await db('messages?select=id,a,an,t,ts,kind,mt&'+f+'&order=ts.desc&limit=100'),pu=['all','sys','clan'].includes(o)?[]:await db('users?select=seen&id=eq.'+enc(o));
+        return j({m:m.reverse().map(x=>({id:x.id,f:x.a==me.id?1:0,n:x.an,t:x.t,ts:x.ts,k:x.kind,mt:x.mt})),seen:(pu[0]||{}).seen||0})}
+      if(p=='/myclan'){const c=await myClan(me.id);return j(c?{id:c.id,n:c.name}:{})}
+      if(p=='/media'){const id=Math.floor(+U.searchParams.get('id'));if(!(id>0))return j({err:'bad'});const x=(await db('messages?select=a,b,mt,media&id=eq.'+id))[0];if(!x)return j({err:'Нет файла'});
+        let ok=x.a==me.id||x.b==me.id||x.b=='all';if(!ok&&String(x.b).startsWith('clan:')){const c=await myClan(me.id);ok=!!c&&x.b=='clan:'+c.id}if(!ok)return j({err:'Нет доступа'},403);
+        if(x.mt=='s'){const sk=(await db('stickers?select=img,pack_id&id=eq.'+(Math.floor(+x.media)||0)))[0],pk=sk&&(await db('sticker_packs?select=ban&id=eq.'+sk.pack_id))[0];return j(pk&&!pk.ban?{m:sk.img}:{err:'🚫 Стикерпак заблокирован'})}
+        return j({m:x.media})}
+      if(p=='/packs')return j(await db('sticker_packs?select=id,uid,n,ban&order=ts.desc&limit=50'+(adm?'':'&ban=eq.false')));
+      if(p=='/pack'&&q.method!='POST'){const id=Math.floor(+U.searchParams.get('id'));const pk=(await db('sticker_packs?select=ban&id=eq.'+(id||0)))[0];if(!pk||(pk.ban&&!adm))return j([]);return j(await db('stickers?select=id,img&pack_id=eq.'+id+'&order=id.asc&limit=30'))}
+      if(p=='/pack'){const n=String(d.n||'').trim().slice(0,24);if(n.length<2)return j({err:'Название от 2 символов'});if(me.mute>Date.now())return j({err:'Ты в муте'});
+        if((await db('sticker_packs?select=id&uid=eq.'+enc(me.id))).length>=5)return j({err:'Максимум 5 паков'});
+        return j({ok:1,id:(await db('sticker_packs','POST',{uid:me.id,n,ts:Date.now()}))[0].id})}
+      if(p=='/sticker'){const pid=Math.floor(+d.pack),img=String(d.img||''),pk=(await db('sticker_packs?select=uid,ban&id=eq.'+(pid||0)))[0];if(!pk||pk.uid!=me.id||pk.ban)return j({err:'Нельзя'});
+        if(!/^data:image\/(webp|png);base64,/.test(img)||img.length>5e4)return j({err:'Стикер слишком большой'});
+        if((await db('stickers?select=id&pack_id=eq.'+pid)).length>=24)return j({err:'В паке максимум 24 стикера'});
+        await db('stickers','POST',{pack_id:pid,img});return j({ok:1})}
+      if(p=='/pack/del'){const id=Math.floor(+d.id),pk=(await db('sticker_packs?select=uid&id=eq.'+(id||0)))[0];if(!pk||(pk.uid!=me.id&&!adm))return j({err:'Нельзя'});
+        await db('stickers?pack_id=eq.'+id,'DELETE');await db('sticker_packs?id=eq.'+id,'DELETE');return j({ok:1})}
       if(p=='/chats'){const m=await db('messages?select=a,b,t&or=(a.eq.'+me.id+',b.eq.'+me.id+')&order=ts.desc&limit=300'),z={};
         m.forEach(x=>{const o=x.a==me.id?x.b:x.a;if(!z[o])z[o]={id:o,last:x.t}});
         const ids=Object.keys(z).filter(i=>ID.test(i));if(!ids.length)return j([]);
@@ -114,4 +141,4 @@ http.createServer((q,s)=>{
     }catch(e){console.error(e.message);j({err:'Ошибка сервера'},500)}
   })
 }).listen(process.env.PORT||3000,()=>console.log('BEANNETWORK ok'));
-            
+  
